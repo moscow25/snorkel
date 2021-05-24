@@ -62,6 +62,7 @@ class TrainConfig(Config):
     seed: int = np.random.randint(1e6)
     log_freq: int = 10
     mu_eps: Optional[float] = None
+    sm_weight: Optional[float] = 0.0 # balance between sm loss (labeled data) and normal snorkel loss
 
 
 class LabelModelConfig(Config):
@@ -144,7 +145,7 @@ class LabelModel(nn.Module, BaseLabeler):
         # By default, put model in eval mode; switch to train mode in training
         self.eval()
 
-    def _create_L_ind(self, L: np.ndarray) -> np.ndarray:
+    def _create_L_ind(self, L: np.ndarray) -> (np.ndarray):
         """Convert a label matrix with labels in 0...k to a one-hot format.
 
         Parameters
@@ -166,7 +167,7 @@ class LabelModel(nn.Module, BaseLabeler):
 
     def _get_augmented_label_matrix(
         self, L: np.ndarray, higher_order: bool = False
-    ) -> np.ndarray:
+    ) -> (np.ndarray):
         """Create augmented version of label matrix.
 
         In augmented version, each column is an indicator
@@ -225,7 +226,7 @@ class LabelModel(nn.Module, BaseLabeler):
         else:
             return L_ind
 
-    def _build_mask(self) -> None:
+    def _build_mask(self) -> (None):
         """Build mask applied to O^{-1}, O for the matrix approx constraint."""
         self.mask = torch.ones(self.d, self.d).bool()
         for ci in self.c_data.values():
@@ -240,7 +241,7 @@ class LabelModel(nn.Module, BaseLabeler):
                     self.mask[si:ei, sj:ej] = 0
                     self.mask[sj:ej, si:ei] = 0
 
-    def _generate_O(self, L: np.ndarray, higher_order: bool = False) -> None:
+    def _generate_O(self, L: np.ndarray, higher_order: bool = False) -> (None):
         """Generate overlaps and conflicts matrix from label matrix.
 
         Parameters
@@ -250,13 +251,24 @@ class LabelModel(nn.Module, BaseLabeler):
         higher_order
             Whether to include higher-order correlations (e.g. LF pairs) in matrix
         """
+
+        print('generate_0')
         L_aug = self._get_augmented_label_matrix(L, higher_order=higher_order)
+
+        print('L_aug', L_aug.shape)
+        print(L_aug)
+
+        self.L_aug = L_aug
+
         self.d = L_aug.shape[1]
         self.O = (
             torch.from_numpy(L_aug.T @ L_aug / self.n).float().to(self.config.device)
         )
 
-    def _init_params(self) -> None:
+        print('self.O', self.O.shape)
+        print(self.O)
+
+    def _init_params(self) -> (None):
         r"""Initialize the learned params.
 
         - \mu is the primary learned parameter, where each row corresponds to
@@ -311,7 +323,7 @@ class LabelModel(nn.Module, BaseLabeler):
         # Build the mask over O^{-1}
         self._build_mask()
 
-    def _get_conditional_probs(self, mu: np.ndarray) -> np.ndarray:
+    def _get_conditional_probs(self, mu: np.ndarray) -> (np.ndarray):
         r"""Return the estimated conditional probabilities table given parameters mu.
 
         Given a parameter vector mu, return the estimated conditional probabilites
@@ -345,7 +357,7 @@ class LabelModel(nn.Module, BaseLabeler):
             cprobs[i, 0, :] = 1 - mu_i.sum(axis=0)
         return cprobs
 
-    def get_conditional_probs(self) -> np.ndarray:
+    def get_conditional_probs(self) -> (np.ndarray):
         r"""Return the estimated conditional probabilities table.
 
         Return the estimated conditional probabilites table cprobs, where cprobs is an
@@ -363,7 +375,7 @@ class LabelModel(nn.Module, BaseLabeler):
         """
         return self._get_conditional_probs(self.mu.cpu().detach().numpy())
 
-    def get_weights(self) -> np.ndarray:
+    def get_weights(self) -> (np.ndarray):
         """Return the vector of learned LF weights for combining LFs.
 
         Returns
@@ -385,7 +397,7 @@ class LabelModel(nn.Module, BaseLabeler):
             accs[i] = np.diag(cprobs[i, 1:, :] @ self.P.cpu().detach().numpy()).sum()
         return np.clip(accs / self.coverage, 1e-6, 1.0)
 
-    def predict_proba(self, L: np.ndarray) -> np.ndarray:
+    def predict_proba(self, L: np.ndarray) -> (np.ndarray):
         r"""Return label probabilities P(Y | \lambda).
 
         Parameters
@@ -424,7 +436,7 @@ class LabelModel(nn.Module, BaseLabeler):
         L: np.ndarray,
         return_probs: Optional[bool] = False,
         tie_break_policy: str = "abstain",
-    ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
+    ) -> (Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]):
         """Return predicted labels, with ties broken according to policy.
 
         Policies to break ties include:
@@ -471,7 +483,7 @@ class LabelModel(nn.Module, BaseLabeler):
         Y: np.ndarray,
         metrics: Optional[List[str]] = ["accuracy"],
         tie_break_policy: str = "abstain",
-    ) -> Dict[str, float]:
+    ) -> (Dict[str, float]):
         """Calculate one or more scores from user-specified and/or user-defined metrics.
 
         Parameters
@@ -511,7 +523,8 @@ class LabelModel(nn.Module, BaseLabeler):
     # These loss functions get all their data directly from the LabelModel
     # (for better or worse). The unused *args make these compatible with the
     # Classifer._train() method which expect loss functions to accept an input.
-    def _loss_l2(self, l2: float = 0) -> torch.Tensor:
+    def _loss_l2(self, l2: float = 0) -> (torch.Tensor):
+
         r"""L2 loss centered around mu_init, scaled optionally per-source.
 
         In other words, diagonal Tikhonov regularization,
@@ -529,6 +542,7 @@ class LabelModel(nn.Module, BaseLabeler):
         torch.Tensor
             L2 loss between learned mu and initial mu
         """
+
         if isinstance(l2, (int, float)):
             D = l2 * torch.eye(self.d)
         else:
@@ -537,7 +551,7 @@ class LabelModel(nn.Module, BaseLabeler):
         # Note that mu is a matrix and this is the *Frobenius norm*
         return torch.norm(D @ (self.mu - self.mu_init)) ** 2
 
-    def _loss_mu(self, l2: float = 0) -> torch.Tensor:
+    def _loss_mu(self, l2: float = 0, debug = False, backprop_sm = False, sm_weight = 0.0) -> (torch.Tensor):
         r"""Overall mu loss.
 
         Parameters
@@ -551,13 +565,98 @@ class LabelModel(nn.Module, BaseLabeler):
         torch.Tensor
             Overall mu loss between learned mu and initial mu
         """
+        if debug and False:
+            print('_loss_mu')
+
         loss_1 = torch.norm((self.O - self.mu @ self.P @ self.mu.t())[self.mask]) ** 2
         loss_2 = torch.norm(torch.sum(self.mu @ self.P, 1) - torch.diag(self.O)) ** 2
-        return loss_1 + loss_2 + self._loss_l2(l2=l2)
+
+        if debug and False:
+            print(loss_1, loss_2)
+            print('mu', self.mu.shape)
+            print(self.mu)
+            print('P', self.P.shape)
+            print(self.P)
+
+        # compute classification error loss.
+
+        L_aug = torch.DoubleTensor(self.L_aug).detach()#.numpy()
+        mu = self.mu#.cpu().detach().numpy()
+        # Need to clamp...
+        mu_eps = 0.001
+        mu = mu.clamp(mu_eps, 1 - mu_eps).double()  # type: ignore
+        #mu = mu.cpu().detach().numpy()
+
+        jtm = torch.ones(L_aug.shape[1]).double()
+
+        #nonce = 0.001
+
+        # Note: We omit abstains, effectively assuming uniform distribution here
+        if debug and False:
+            print('L_aug')
+            print(L_aug)
+            print('mu')
+            print(np.log(mu))
+            print('self.p')
+            print(np.log(self.p))
+        #X = np.exp(L_aug @ np.diag(jtm) @ np.log(mu) + np.log(self.p))
+        X = torch.exp(torch.matmul(torch.matmul(L_aug, torch.diag(jtm)), torch.log(mu)) + torch.log(torch.DoubleTensor(self.p).detach()))
+        #Z = torch.tile(X.sum(dim=1).reshape(-1,1), self.cardinality)
+        #Z = np.tile(X.cpu().detach().numpy().sum(axis=1).reshape(-1, 1), self.cardinality)
+        Z = torch.tile(X.sum(dim=1).reshape((-1,1)), (self.cardinality,)) #+ nonce
+        #Z = torch.DoubleTensor(Z) + nonce
+        if debug and False:
+            print(Z)
+        scores = X / Z
+        if debug and False:
+            print('X', X.shape)
+            print('Z', Z.shape)
+            print('scores', scores.shape)
+            print(scores)
+
+        # Compare with training labels...
+        if debug and False:
+            print(self.training_labels)
+        labels = torch.LongTensor(self.training_labels).detach()
+        if debug and False:
+            print(labels)
+            print(torch.sum(labels))
+        training_mask = (labels > 0)
+        if debug and False:
+            print(training_mask)
+            print(torch.sum(training_mask.long()))
+        labels = torch.clamp((labels - 1), 0,self.cardinality)
+        if debug and False:
+            print(labels)
+            print(torch.sum(labels))
+
+        #scores = torch.FloatTensor(scores)
+        scores = torch.log(scores)
+
+        # HACK -- back to negative and positive values?
+
+        #cross_entropy = torch.nn.functional.nll_loss(input=scores, target=labels, reduction='none')
+        #cross_entropy = nn.NLLLoss()
+        cross_entropy = self.nll_loss(scores, labels)
+        cross_entropy = cross_entropy * training_mask.long()
+        entropy_loss = torch.sum(cross_entropy) / torch.sum(training_mask.long())
+        if debug:
+            #print(cross_entropy.shape)
+            #print(cross_entropy)
+            print('cross-entropy loss...')
+            print(entropy_loss)
+            print('other losses')
+            print(loss_1, loss_2, self._loss_l2(l2=l2))
+
+        if backprop_sm:
+            assert sm_weight >= 0.0 and sm_weight <= 1.0, 'Need to pass sm_weight in [0.0, 1.0] range, %s' % sm_weight
+            return (loss_1 + loss_2 + self._loss_l2(l2=l2)).double() * (1.0 - sm_weight) + entropy_loss * sm_weight
+        else:
+            return (loss_1 + loss_2 + self._loss_l2(l2=l2)).double()
 
     def _set_class_balance(
         self, class_balance: Optional[List[float]], Y_dev: np.ndarray
-    ) -> None:
+    ) -> (None):
         """Set a prior for the class balance.
 
         In order of preference:
@@ -588,17 +687,17 @@ class LabelModel(nn.Module, BaseLabeler):
             )
         self.P = torch.diag(torch.from_numpy(self.p)).float().to(self.config.device)
 
-    def _set_constants(self, L: np.ndarray) -> None:
+    def _set_constants(self, L: np.ndarray) -> (None):
         self.n, self.m = L.shape
         if self.m < 3:
             raise ValueError("L_train should have at least 3 labeling functions")
         self.t = 1
 
-    def _create_tree(self) -> None:
+    def _create_tree(self) -> (None):
         nodes = range(self.m)
         self.c_tree = get_clique_tree(nodes, [])
 
-    def _execute_logging(self, loss: torch.Tensor) -> Metrics:
+    def _execute_logging(self, loss: torch.Tensor) -> (Metrics):
         self.eval()
         self.running_examples: int
         self.running_loss: float
@@ -619,10 +718,10 @@ class LabelModel(nn.Module, BaseLabeler):
         self.train()
         return metrics_dict
 
-    def _set_logger(self) -> None:
+    def _set_logger(self) -> (None):
         self.logger = Logger(self.train_config.log_freq)
 
-    def _set_optimizer(self) -> None:
+    def _set_optimizer(self) -> (None):
         parameters = filter(lambda p: p.requires_grad, self.parameters())
 
         optimizer_config = self.train_config.optimizer_config
@@ -655,7 +754,7 @@ class LabelModel(nn.Module, BaseLabeler):
 
         self.optimizer = optimizer
 
-    def _set_lr_scheduler(self) -> None:
+    def _set_lr_scheduler(self) -> (None):
         # Set warmup scheduler
         self._set_warmup_scheduler()
 
@@ -687,7 +786,7 @@ class LabelModel(nn.Module, BaseLabeler):
 
         self.lr_scheduler = lr_scheduler
 
-    def _set_warmup_scheduler(self) -> None:
+    def _set_warmup_scheduler(self) -> (None):
         warmup_scheduler: Optional[optim.lr_scheduler.LambdaLR]
 
         if self.train_config.lr_scheduler_config.warmup_steps:
@@ -725,7 +824,7 @@ class LabelModel(nn.Module, BaseLabeler):
 
         self.warmup_scheduler = warmup_scheduler
 
-    def _update_lr_scheduler(self, step: int) -> None:
+    def _update_lr_scheduler(self, step: int) -> (None):
         if self.warmup_scheduler and step < self.warmup_steps:
             self.warmup_scheduler.step()  # type: ignore
         elif self.lr_scheduler is not None:
@@ -734,7 +833,7 @@ class LabelModel(nn.Module, BaseLabeler):
             if min_lr and self.optimizer.param_groups[0]["lr"] < min_lr:
                 self.optimizer.param_groups[0]["lr"] = min_lr
 
-    def _clamp_params(self) -> None:
+    def _clamp_params(self) -> (None):
         """Clamp the values of the learned parameter vector.
 
         Clamp the entries of self.mu to be in [mu_eps, 1 - mu_eps], where mu_eps is
@@ -753,9 +852,11 @@ class LabelModel(nn.Module, BaseLabeler):
             mu_eps = self.train_config.mu_eps
         else:
             mu_eps = min(0.01, 1 / 10 ** np.ceil(np.log10(self.n)))
+            print('clamp_value')
+            print(mu_eps)
         self.mu.data = self.mu.clamp(mu_eps, 1 - mu_eps)  # type: ignore
 
-    def _break_col_permutation_symmetry(self) -> None:
+    def _break_col_permutation_symmetry(self) -> (None):
         r"""Heuristically choose amongst (possibly) several valid mu values.
 
         If there are several values of mu that equivalently satisfy the optimization
@@ -807,10 +908,12 @@ class LabelModel(nn.Module, BaseLabeler):
     def fit(
         self,
         L_train: np.ndarray,
+        L_train_labels: Optional[np.ndarray] = None,
         Y_dev: Optional[np.ndarray] = None,
         class_balance: Optional[List[float]] = None,
         **kwargs: Any,
-    ) -> None:
+    ) -> (None):
+
         """Train label model.
 
         Train label model to estimate mu, the parameters used to combine LFs.
@@ -868,6 +971,10 @@ class LabelModel(nn.Module, BaseLabeler):
         >>> label_model.fit(L, Y_dev=Y_dev, seed=2020, lr=0.05)
         >>> label_model.fit(L, class_balance=[0.7, 0.3], n_epochs=200, l2=0.4)
         """
+        print('starting FIT')
+        print(self.config)
+        #self.config.verbose = True
+
         # Set random seed
         self.train_config: TrainConfig = merge_config(  # type:ignore
             TrainConfig(), kwargs  # type:ignore
@@ -877,29 +984,69 @@ class LabelModel(nn.Module, BaseLabeler):
         np.random.seed(self.train_config.seed)
         torch.manual_seed(self.train_config.seed)
 
+        # Check at "sm_weight" is in a normal range // tradeoff between normal Snorkel
+        # loss & supervised training on labeled examples.
+        sm_weight = self.train_config.sm_weight
+        assert sm_weight >= 0.0 and sm_weight <= 1.0, "Set sm_weight [0.0, 1.0] for ratio between Snorkel and supervised losses."
+
+
         L_shift = L_train + 1  # convert to {0, 1, ..., k}
         if L_shift.max() > self.cardinality:
             raise ValueError(
                 f"L_train has cardinality {L_shift.max()}, cardinality={self.cardinality} passed in."
             )
 
+        # If we train with labeled data, assert this exists.
+        if sm_weight > 0.0:
+            assert L_train_labels.any() and L_train_labels.shape[0] > 0, 'Provide training labels if sm_weight > 0.0'
+            # Need to adjust labels + 1 -- as in training data
+            self.training_labels = np.array(L_train_labels) + 1
+            print(self.training_labels.shape)
+
+            print(self.training_labels)
+            print('Counting labels -- assuming last col is truth labels')
+            print(np.bincount(self.training_labels))
+            print(self.training_labels.shape)
+
+            print('loaded training labels via ~new way~')
+
+        """
+        # Hack -- assume last feature are the labels
+        #print(L_shift.shape)
+        self.training_labels = L_shift[:,-1]
+        print(self.training_labels)
+        print('Counting labels -- assuming last col is truth labels')
+        print(np.bincount(self.training_labels))
+        print(self.training_labels.shape)
+        #assert False
+        """
+
+        # Hack -- reduce dimensions -- drop the truth labels...
+        #L_shift = L_shift[:,:-12]
+
+        #self._set_constants(L_shift[:,:-12])
         self._set_constants(L_shift)
         self._set_class_balance(class_balance, Y_dev)
         self._create_tree()
+        #lf_analysis = LFAnalysis(L_train[:,:-12])
         lf_analysis = LFAnalysis(L_train)
         self.coverage = lf_analysis.lf_coverages()
 
         # Compute O and initialize params
         if self.config.verbose:  # pragma: no cover
             logging.info("Computing O...")
+        #self._generate_O(L_shift[:,:-12])
         self._generate_O(L_shift)
         self._init_params()
 
         # Estimate \mu
+        print('estimate mu')
         if self.config.verbose:  # pragma: no cover
             logging.info("Estimating \mu...")
 
         # Set model to train mode
+        #self.nll_loss = torch.nn.NLLLoss(reduction='none')
+        self.nll_loss = torch.nn.CrossEntropyLoss(reduction='none')
         self.train()
 
         # Move model to GPU
@@ -919,6 +1066,7 @@ class LabelModel(nn.Module, BaseLabeler):
         # Train the model
         metrics_hist = {}  # The most recently seen value for all metrics
         for epoch in range(start_iteration, self.train_config.n_epochs):
+            #print('epoch', epoch)
             self.running_loss = 0.0
             self.running_examples = 0
 
@@ -926,7 +1074,8 @@ class LabelModel(nn.Module, BaseLabeler):
             self.optimizer.zero_grad()
 
             # Forward pass to calculate the average loss per example
-            loss = self._loss_mu(l2=self.train_config.l2)
+            loss = self._loss_mu(l2=self.train_config.l2, debug = (epoch % 100 == 99),
+                backprop_sm = (sm_weight > 0.0), sm_weight = sm_weight)
             if torch.isnan(loss):
                 msg = "Loss is NaN. Consider reducing learning rate."
                 raise Exception(msg)
@@ -945,9 +1094,16 @@ class LabelModel(nn.Module, BaseLabeler):
             # Update learning rate
             self._update_lr_scheduler(epoch)
 
+        # Bad MU
+        #print('final Mu')
+        #print(self.mu)
+
         # Post-processing operations on mu
         self._clamp_params()
         self._break_col_permutation_symmetry()
+
+        #print('clamp Mu')
+        #print(self.mu)
 
         # Return model to eval mode
         self.eval()
