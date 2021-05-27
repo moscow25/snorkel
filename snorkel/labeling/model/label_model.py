@@ -85,6 +85,18 @@ class _CliqueData(NamedTuple):
     end_index: int
     max_cliques: Set[int]
 
+    
+class LinearDecayFunc:
+    def __init__(self, total_steps, warmup_steps) -> None:
+        self.total_steps = total_steps
+        self.warmup_steps = warmup_steps
+
+    def __call__(self, x) -> float:
+        lr = (self.total_steps - self.warmup_steps - x) / (
+                        self.total_steps - self.warmup_steps
+            )
+
+        return lr
 
 class LabelModel(nn.Module, BaseLabeler):
     r"""A model for learning the LF accuracies and combining their output labels.
@@ -767,9 +779,7 @@ class LabelModel(nn.Module, BaseLabeler):
             lr_scheduler = None
         elif lr_scheduler_name == "linear":
             total_steps = self.train_config.n_epochs
-            linear_decay_func = lambda x: (total_steps - self.warmup_steps - x) / (
-                total_steps - self.warmup_steps
-            )
+            linear_decay_func = LinearDecayFunc(total_steps, self.warmup_steps)
             lr_scheduler = optim.lr_scheduler.LambdaLR(  # type: ignore
                 self.optimizer, linear_decay_func
             )
